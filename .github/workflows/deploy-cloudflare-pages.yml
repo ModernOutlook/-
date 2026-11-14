@@ -1,0 +1,40 @@
+name: Deploy Pooyesh Zamin Web
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "web-release/**"
+      - ".github/workflows/deploy-cloudflare-pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloudflare-pages-production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout publication repository
+        uses: actions/checkout@v4
+
+      - name: Verify web release files
+        run: |
+          test -f web-release/index.html
+          test -f web-release/admin.html
+          test -f web-release/patrol.html
+          test -f web-release/subscriber.html
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          projectName: pooyeshzamin-web
+          directory: web-release
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
