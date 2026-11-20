@@ -1,0 +1,130 @@
+name: Release PooyeshZamin installers
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/release-installers.yml
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: "Successful installer build run in kazemandroid77-ai/pooyeshzamin"
+        required: true
+        default: "44688736985"
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pooyeshzamin-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Resolve and verify successful source build
+        id: source
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_RUN_ID: ${{ inputs.source_run_id }}
+          PUSH_RUN_ID: "44688736985"
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            run_id="$INPUT_RUN_ID"
+          else
+            run_id="$PUSH_RUN_ID"
+          fi
+          [[ "$run_id" =~ ^[0-9]+$ ]] || { echo "Invalid source run ID." >&2; exit 1; }
+
+          api="https://api.github.com/repos/kazemandroid77-ai/pooyeshzamin"
+          run_json="$(curl --fail --silent --show-error "$api/actions/runs/$run_id")"
+          jq -e '
+            .status == "completed" and
+            .conclusion == "success" and
+            .head_branch == "build/v1.0.53-main-current" and
+            .path == ".github/workflows/build-installers-1.0.53.yml"
+          ' <<< "$run_json" >/dev/null || {
+            echo "Source run is not the expected successful 1.0.53 build." >&2
+            exit 1
+          }
+          source_sha="$(jq -r '.head_sha' <<< "$run_json")"
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Download the final installer bundle from source run
+        shell: bash
+        env:
+          SOURCE_RUN_ID: ${{ steps.source.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/kazemandroid77-ai/pooyeshzamin"
+          artifacts_json="$(curl --fail --silent --show-error "$api/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100")"
+          artifact="$(jq -cer '
+            [.artifacts[]
+              | select(.expired == false)
+              | select(.name == "PooyeshZamin-1.0.53-Installers")]
+            | if length == 1 then .[0] else error("Expected exactly one final 1.0.53 installer bundle") end
+          ' <<< "$artifacts_json")"
+          artifact_id="$(jq -r '.id' <<< "$artifact")"
+          expected_digest="$(jq -r '.digest' <<< "$artifact" | sed 's/^sha256://')"
+          curl --fail --location --silent --show-error --retry 3 \
+            "$api/actions/artifacts/$artifact_id/zip" -o "$RUNNER_TEMP/pooyeshzamin-1.0.53.zip"
+          actual_digest="$(sha256sum "$RUNNER_TEMP/pooyeshzamin-1.0.53.zip" | awk '{print $1}')"
+          [[ "$actual_digest" == "$expected_digest" ]] || {
+            echo "Downloaded artifact digest mismatch." >&2
+            exit 1
+          }
+          mkdir -p release-assets
+          unzip -q "$RUNNER_TEMP/pooyeshzamin-1.0.53.zip" -d release-assets
+
+      - name: Validate all installers and checksums
+        id: validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          for file in \
+            pooyesh-admin-1.0.53.apk \
+            pooyesh-patrol-1.0.53.apk \
+            pooyesh-subscriber-1.0.53.apk \
+            PooyeshZamin-Admin-Setup-1.0.53.exe \
+            latest.yml SHA256SUMS.txt RELEASE_NOTES.md; do
+            test -s "$file" || { echo "Missing or empty release file: $file" >&2; exit 1; }
+          done
+          test "$(find . -maxdepth 1 -type f -name '*.apk' | wc -l)" -eq 3
+          test "$(find . -maxdepth 1 -type f -name '*.exe' | wc -l)" -eq 1
+          test "$(find . -maxdepth 1 -type f -name '*.blockmap' | wc -l)" -ge 1
+          grep -Eq "^version: *['\"]?1\.0\.53([ '\"]|$)" latest.yml
+          sha256sum --check SHA256SUMS.txt
+          echo "version=1.0.53" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update the destination GitHub Release
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          tag="v1.0.53"
+          title="Pooyesh Zamin v1.0.53"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" \
+              --title "$title" --notes-file release-assets/RELEASE_NOTES.md
+          else
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+              --title "$title" --notes-file release-assets/RELEASE_NOTES.md
+          fi
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" \
+            release-assets/*.apk \
+            release-assets/*.exe \
+            release-assets/*.blockmap \
+            release-assets/latest.yml \
+            release-assets/SHA256SUMS.txt \
+            --clobber
+          echo "Published $tag from source commit $SOURCE_SHA"
