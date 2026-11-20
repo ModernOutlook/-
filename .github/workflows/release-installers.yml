@@ -34,8 +34,14 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           INPUT_RUN_ID: ${{ inputs.source_run_id }}
           PUSH_RUN_ID: "44688736985"
+          SOURCE_READ_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN || secrets.DISTRIBUTION_TOKEN }}
         run: |
           set -euo pipefail
+          test -n "$SOURCE_READ_TOKEN" || {
+            echo "Configure SOURCE_REPO_TOKEN (read access to kazemandroid77-ai/pooyeshzamin) in this destination repository." >&2
+            exit 1
+          }
+          auth_header="Authorization: Bearer $SOURCE_READ_TOKEN"
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             run_id="$INPUT_RUN_ID"
           else
@@ -44,7 +50,7 @@ jobs:
           [[ "$run_id" =~ ^[0-9]+$ ]] || { echo "Invalid source run ID." >&2; exit 1; }
 
           api="https://api.github.com/repos/kazemandroid77-ai/pooyeshzamin"
-          run_json="$(curl --fail --silent --show-error "$api/actions/runs/$run_id")"
+          run_json="$(curl --fail --silent --show-error -H "$auth_header" "$api/actions/runs/$run_id")"
           jq -e '
             .status == "completed" and
             .conclusion == "success" and
@@ -62,10 +68,12 @@ jobs:
         shell: bash
         env:
           SOURCE_RUN_ID: ${{ steps.source.outputs.run_id }}
+          SOURCE_READ_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN || secrets.DISTRIBUTION_TOKEN }}
         run: |
           set -euo pipefail
+          auth_header="Authorization: Bearer $SOURCE_READ_TOKEN"
           api="https://api.github.com/repos/kazemandroid77-ai/pooyeshzamin"
-          artifacts_json="$(curl --fail --silent --show-error "$api/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100")"
+          artifacts_json="$(curl --fail --silent --show-error -H "$auth_header" "$api/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100")"
           artifact="$(jq -cer '
             [.artifacts[]
               | select(.expired == false)
@@ -75,7 +83,7 @@ jobs:
           artifact_id="$(jq -r '.id' <<< "$artifact")"
           expected_digest="$(jq -r '.digest' <<< "$artifact" | sed 's/^sha256://')"
           curl --fail --location --silent --show-error --retry 3 \
-            "$api/actions/artifacts/$artifact_id/zip" -o "$RUNNER_TEMP/pooyeshzamin-1.0.53.zip"
+            -H "$auth_header" "$api/actions/artifacts/$artifact_id/zip" -o "$RUNNER_TEMP/pooyeshzamin-1.0.53.zip"
           actual_digest="$(sha256sum "$RUNNER_TEMP/pooyeshzamin-1.0.53.zip" | awk '{print $1}')"
           [[ "$actual_digest" == "$expected_digest" ]] || {
             echo "Downloaded artifact digest mismatch." >&2
